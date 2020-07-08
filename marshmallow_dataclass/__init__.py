@@ -162,7 +162,7 @@ def add_schema(_cls=None, base_schema=None):
 
 
 def class_schema(
-    clazz: type, base_schema: Optional[Type[marshmallow.Schema]] = None
+    clazz: type, base_schema: Optional[Type[marshmallow.Schema]] = None, *, filter_init_false: bool = True
 ) -> Type[marshmallow.Schema]:
 
     """
@@ -170,6 +170,7 @@ def class_schema(
 
     :param clazz: A python class (may be a dataclass)
     :param base_schema: marshmallow schema used as a base class when deriving dataclass schema
+    :param filter_init_false: flag if include fields with init=false
     :return: A marshmallow Schema corresponding to the dataclass
 
     .. note::
@@ -275,17 +276,19 @@ def class_schema(
     ...
     marshmallow.exceptions.ValidationError: {'name': ['Name too long']}
     """
-    return _proxied_class_schema(clazz, base_schema)
+    return _proxied_class_schema(clazz, filter_init_false, base_schema)
 
 
 @lru_cache(maxsize=MAX_CLASS_SCHEMA_CACHE_SIZE)
 def _proxied_class_schema(
-    clazz: type, base_schema: Optional[Type[marshmallow.Schema]] = None
+    clazz: type, filter_init_false: bool, base_schema: Optional[Type[marshmallow.Schema]] = None
 ) -> Type[marshmallow.Schema]:
 
     try:
         # noinspection PyDataclass
         fields: Tuple[dataclasses.Field, ...] = dataclasses.fields(clazz)
+        if filter_init_false:
+            fields = tuple(field_ for field_ in fields if field_.init)
     except TypeError:  # Not a dataclass
         try:
             return class_schema(dataclasses.dataclass(clazz), base_schema)
@@ -312,7 +315,7 @@ def _proxied_class_schema(
         if field.init
     )
 
-    schema_class = type(clazz.__name__, (_base_schema(clazz, base_schema),), attributes)
+    schema_class = type(f'{clazz.__name__}Schema', (_base_schema(clazz, base_schema),), attributes)
     return cast(Type[marshmallow.Schema], schema_class)
 
 
@@ -473,9 +476,25 @@ def _base_schema(
             all_loaded = super().load(data, many=many, **kwargs)
             many = self.many if many is None else bool(many)
             if many:
-                return [clazz(**loaded) for loaded in all_loaded]
+                return [self.class_factory(loaded) for loaded in all_loaded]
             else:
-                return clazz(**all_loaded)
+                return self.class_factory(all_loaded)
+
+        @staticmethod
+        def class_factory(data: StrAnyDict) -> Any:
+            not_init_args = set(data) - {x for x in class_.__init__.__annotations__ if x != 'return'}  # type: ignore
+
+            init_args = {
+                k: v
+                for k, v in data.items()
+                if k not in not_init_args
+            }
+
+            result = class_(**init_args)
+            for k in not_init_args:
+                setattr(result, k, data[k])
+
+            return result
 
     return BaseSchema
 
